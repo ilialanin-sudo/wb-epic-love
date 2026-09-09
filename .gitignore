@@ -1,0 +1,6 @@
+.env
+__pycache__/
+dist/
+data/
+cost.json
+*.pyc

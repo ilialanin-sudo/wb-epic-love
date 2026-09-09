@@ -1,0 +1,95 @@
+name: EPIC LOVE dashboard
+
+on:
+  schedule:
+    # каждый час в :19 — на ровном часе очередь GitHub длиннее и запуск задерживается
+    - cron: "19 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_finance:
+        description: "Пересобрать финотчёт прямо сейчас (обычно раз в 20 часов)"
+        type: boolean
+        default: false
+      max_pages:
+        description: "Сколько страниц FBS-заказов разобрать за прогон"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: epic-dashboard
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Себестоимость из секрета
+        env:
+          COST_JSON: ${{ secrets.COST_JSON }}
+        run: |
+          if [ -n "$COST_JSON" ]; then
+            printf '%s' "$COST_JSON" > cost.json
+            python -c "import json;d=json.load(open('cost.json'));print('себестоимость:',len(d.get('by_article',{})),'артикулов')"
+          else
+            echo "секрет COST_JSON не задан — прибыль считаться не будет, всё остальное работает"
+          fi
+
+      - name: Выгрузка из Wildberries
+        env:
+          WB_TOKEN: ${{ secrets.WB_TOKEN }}
+          WB_MAX_PAGES: ${{ github.event.inputs.max_pages }}
+          WB_FORCE_FINANCE: ${{ github.event.inputs.force_finance == 'true' && '1' || '' }}
+        run: |
+          if [ -z "$WB_TOKEN" ]; then echo "::error::секрет WB_TOKEN не задан"; exit 1; fi
+          python collect.py
+
+      - name: Свод и страница
+        run: |
+          python aggregate.py
+          python render.py
+
+      - name: Сохранить состояние в репозиторий
+        run: |
+          git config user.name  "epic-dashboard"
+          git config user.email "actions@github.com"
+          git add -f state/
+          if ! git diff --cached --quiet; then
+            git commit -m "состояние $(date -u +%F' '%H:%M) UTC"
+            git pull --rebase --autostash || true
+            git push || echo "push не прошёл — попробуем в следующий час"
+          else
+            echo "состояние не изменилось"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dashboard
+          path: dist/index.html
+          retention-days: 14
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
